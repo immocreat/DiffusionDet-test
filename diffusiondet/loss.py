@@ -16,7 +16,12 @@ import torchvision.ops as ops
 from .util import box_ops
 from .util.misc import get_world_size, is_dist_avail_and_initialized
 from .util.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh, generalized_box_iou
+import torch.multiprocessing as mp
+import time
+from queue import Empty
+from multiprocessing.managers import BaseManager
 
+class MyManager(BaseManager): pass
 
 class SetCriterionDynamicK(nn.Module):
     """ This class computes the loss for DiffusionDet.
@@ -59,6 +64,11 @@ class SetCriterionDynamicK(nn.Module):
             empty_weight = torch.ones(self.num_classes + 1)
             empty_weight[-1] = self.eos_coef
             self.register_buffer('empty_weight', empty_weight)
+        self.ctx = torch.multiprocessing.get_context("spawn")
+        self.p_pool = []
+        self.q_proc_args = self.ctx.JoinableQueue(8)
+        MyManager.register("op_loop",self.op_loop)
+        
 
     # copy-paste from https://github.com/facebookresearch/detectron2/blob/main/detectron2/modeling/roi_heads/fast_rcnn.py#L356
     def get_fed_loss_classes(self, gt_classes, num_fed_loss_classes, num_classes, weight):
@@ -250,22 +260,50 @@ class SetCriterionDynamicK(nn.Module):
             losses.update(self.get_loss(loss, outputs, targets, indices, num_boxes))
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
+        
+        t_start = time.time()
         if 'aux_outputs' in outputs:
+            if len(self.p_pool) == 0 :
+                for _ in range(4):
+                    p = self.ctx.Process(target=self.warp_op_loop, args=(self.q_proc_args,))
+                    self.p_pool.append(p)
+                    p.start()
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
-                indices, _ = self.matcher(aux_outputs, targets)
-                for loss in self.losses:
-                    if loss == 'masks':
-                        # Intermediate masks losses are too costly to compute, we ignore them.
-                        continue
-                    kwargs = {}
-                    if loss == 'labels':
-                        # Logging is enabled only for the last layer
-                        kwargs = {'log': False}
-                    l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_boxes, **kwargs)
-                    l_dict = {k + f'_{i}': v for k, v in l_dict.items()}
-                    losses.update(l_dict)
-
+                # self.q_proc_args.put((1,(1,1,1,1,1,),))
+                # args_list[i] = (self.op_loop, )
+                self.q_proc_args.put((targets, num_boxes, losses, i, aux_outputs,))
+            self.q_proc_args.join()
+            
+        t_end = time.time()
+        print(f"time:{t_end - t_start}")
         return losses
+
+    def op_loop(self, targets, num_boxes, losses, i, aux_outputs):
+        indices, _ = self.matcher(aux_outputs, targets)
+        for loss in self.losses:
+            if loss == 'masks':
+                        # Intermediate masks losses are too costly to compute, we ignore them.
+                continue
+            kwargs = {}
+            if loss == 'labels':
+                        # Logging is enabled only for the last layer
+                kwargs = {'log': False}
+            l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_boxes, **kwargs)
+            l_dict = {k + f'_{i}': v for k, v in l_dict.items()}
+            losses.update(l_dict)
+            
+def warp_op_loop(q_proc_args):
+    mng = MyManager()
+    mng.start()
+    try:
+        while 1:
+            args = q_proc_args.get(block=True, timeout=3)
+            # args = args_list[i]
+            mng.op_loop(*args)
+            q_proc_args.task_done()
+    except Empty:
+        mng.shutdown()
+        return
 
 
 class HungarianMatcherDynamicK(nn.Module):

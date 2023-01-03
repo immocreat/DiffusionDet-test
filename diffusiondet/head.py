@@ -25,8 +25,8 @@ from detectron2.modeling.poolers import ROIPooler
 from detectron2.structures import Boxes
 
 
-_DEFAULT_SCALE_CLAMP = math.log(100000.0 / 16)
-
+# _DEFAULT_SCALE_CLAMP = math.log(100000.0 / 16)
+_DEFAULT_SCALE_CLAMP = 0.8
 
 class SinusoidalPositionEmbeddings(nn.Module):
     def __init__(self, dim):

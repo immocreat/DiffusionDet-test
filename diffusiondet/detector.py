@@ -316,18 +316,18 @@ class DiffusionDet(nn.Module):
 
         if self.training:
             gt_instances = [x["instances"].to(self.device) for x in batched_inputs]
-            targets, x_boxes, noises, t = self.prepare_targets(gt_instances)
+            targets, x_boxes, noises, t = self.prepare_targets(gt_instances) # CPU op???
             t = t.squeeze(-1)
             x_boxes = x_boxes * images_whwh[:, None, :]
 
-            outputs_class, outputs_coord = self.head(features, x_boxes, t, None)
+            outputs_class, outputs_coord = self.head(features, x_boxes, t, None) # CPU part
             output = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
 
             if self.deep_supervision:
                 output['aux_outputs'] = [{'pred_logits': a, 'pred_boxes': b}
                                          for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
 
-            loss_dict = self.criterion(output, targets)
+            loss_dict = self.criterion(output, targets) # cost too much time
             weight_dict = self.criterion.weight_dict
             for k in loss_dict.keys():
                 if k in weight_dict:
